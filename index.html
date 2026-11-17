@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Escáner de código · Almacén</title>
+<style>
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ margin:0; height:100%; }
+  body{
+    background:#0b1726; color:#eaf2fb; font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    display:flex; flex-direction:column; min-height:100dvh; padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  }
+  header{ padding:14px 16px 8px; }
+  header h1{ font-size:18px; margin:0 0 2px; font-weight:700; }
+  header p{ margin:0; color:#9fb6cf; font-size:13.5px; }
+  .wrap{ flex:1; display:flex; flex-direction:column; padding:10px 16px 16px; }
+  #reader{ width:100%; border-radius:16px; overflow:hidden; background:#000; min-height:46vh; }
+  #reader video{ border-radius:16px; }
+  .row{ display:flex; gap:10px; margin-top:12px; flex-wrap:wrap; }
+  .btn{
+    flex:1 1 auto; display:inline-flex; align-items:center; justify-content:center; gap:8px;
+    min-height:52px; padding:0 16px; border-radius:14px; border:1px solid #27425f; background:#13273d; color:#eaf2fb;
+    font-size:16px; font-weight:600; cursor:pointer; user-select:none;
+  }
+  .btn:active{ transform:translateY(1px); }
+  .btn.on{ background:#f2a900; border-color:#f2a900; color:#201500; }
+  .btn.primary{ background:#1565a6; border-color:#1565a6; color:#fff; }
+  .hint{ color:#9fb6cf; font-size:13.5px; margin-top:12px; text-align:center; }
+  .status{
+    margin-top:12px; border-radius:14px; padding:12px 14px; font-weight:600; text-align:center; display:none;
+    background:#10351f; border:1px solid #1f7a44; color:#8ff0b6; font-size:17px; word-break:break-all;
+  }
+  .status.err{ background:#3a1620; border-color:#8a2740; color:#ffb3c2; }
+  .manual{ margin-top:14px; display:flex; gap:10px; }
+  .manual input{
+    flex:1; min-height:52px; border-radius:14px; border:1px solid #27425f; background:#0a1a2a; color:#eaf2fb;
+    padding:0 14px; font-size:16px;
+  }
+  .svgico{ width:20px; height:20px; display:inline-block; vertical-align:middle; }
+  .err-box{ background:#3a1620; border:1px solid #8a2740; color:#ffd4dc; border-radius:14px; padding:14px; margin-top:12px; font-size:14.5px; }
+  a{ color:#8ec8ff; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Escáner de código</h1>
+    <p id="sub">Apunte al código de barras del material.</p>
+  </header>
+  <div class="wrap">
+    <div id="reader"></div>
+    <div class="row">
+      <button class="btn" id="torch" hidden>
+        <svg class="svgico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        Linterna
+      </button>
+      <button class="btn" id="switch" hidden>
+        <svg class="svgico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.5 9a9 9 0 0114.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0020.5 15"/></svg>
+        Cambiar cámara
+      </button>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="manual">
+      <input id="manual" inputmode="text" autocomplete="off" placeholder="o digite el código y Enter">
+      <button class="btn primary" id="send" style="flex:0 0 auto;min-width:92px">Enviar</button>
+    </div>
+    <p class="hint" id="hint">Iniciando cámara…</p>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+(function () {
+  'use strict';
+  var P = new URLSearchParams(location.search);
+  var TOKEN = P.get('t') || '';
+  var OPENER_ORIGIN = P.get('o') || '';          // origen de la app que abrió esta ventana
+  var LABEL = P.get('l') || 'del material';       // "del material" / "del bulto"
+  document.getElementById('sub').textContent = 'Apunte al código de barras ' + LABEL + '.';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var qr = null, cams = [], idx = 0, torchOn = false, running = false, lastCode = '', lastAt = 0;
+
+  function beep(ok) {
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+      var c = new AC(), o = c.createOscillator(), g = c.createGain();
+      o.connect(g); g.connect(c.destination);
+      o.frequency.value = ok ? 920 : 320; g.gain.value = 0.12;
+      o.start(); setTimeout(function () { o.stop(); c.close(); }, ok ? 120 : 220);
+    } catch (e) {}
+    try { if (navigator.vibrate) navigator.vibrate(ok ? 60 : [40, 60, 40]); } catch (e) {}
+  }
+
+  function sendCode(code) {
+    code = String(code || '').trim();
+    if (!code) return;
+    var now = Date.now();
+    if (code === lastCode && (now - lastAt) < 1500) return;  // anti-rebote
+    lastCode = code; lastAt = now;
+    beep(true);
+    var st = $('status'); st.className = 'status'; st.style.display = 'block';
+    st.textContent = 'Leído: ' + code;
+    var msg = { __ccScan: true, t: TOKEN, code: code };
+    if (window.opener && !window.opener.closed) {
+      try { window.opener.postMessage(msg, OPENER_ORIGIN || '*'); } catch (e) {
+        try { window.opener.postMessage(msg, '*'); } catch (e2) {}
+      }
+      // Lectura única: devuelve el foco a la app y cierra la ventana del escáner.
+      setTimeout(function () { stop(); try { window.close(); } catch (e) {} }, 220);
+    } else {
+      // Sin ventana que la abrió: muestra el código para copiarlo manualmente.
+      st.textContent = 'Código: ' + code + '  (cópielo en la app)';
+    }
+  }
+
+  function fmts() {
+    var F = window.Html5QrcodeSupportedFormats;
+    return F ? [F.CODE_128, F.CODE_39, F.CODE_93, F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.ITF, F.CODABAR, F.QR_CODE, F.DATA_MATRIX] : undefined;
+  }
+
+  function start() {
+    qr = new Html5Qrcode('reader', { formatsToSupport: fmts(), verbose: false, experimentalFeatures: { useBarCodeDetectorIfSupported: true } });
+    var src = cams.length ? cams[idx].id : { facingMode: 'environment' };
+    return qr.start(src, {
+      fps: 12,
+      qrbox: function (w, h) { return { width: Math.floor(Math.min(w * 0.9, 420)), height: Math.floor(Math.min(h * 0.55, 200)) }; }
+    }, function (text) { sendCode(text); }, function () {}).then(function () {
+      running = true;
+      $('hint').textContent = (cams[idx] && cams[idx].label ? cams[idx].label + ' · ' : '') + 'Mantenga el código dentro del recuadro, con buena luz.';
+      setTimeout(setupTorch, 500);
+    });
+  }
+
+  function setupTorch() {
+    var tb = $('torch'); if (!tb || !qr) return;
+    var caps = {}; try { caps = qr.getRunningTrackCapabilities() || {}; } catch (e) {}
+    if (caps.torch) {
+      tb.hidden = false;
+      tb.onclick = function () {
+        torchOn = !torchOn;
+        qr.applyVideoConstraints({ advanced: [{ torch: torchOn }] })
+          .then(function () { tb.classList.toggle('on', torchOn); })
+          .catch(function () { torchOn = false; });
+      };
+    } else { tb.hidden = true; }
+  }
+
+  function stop() {
+    running = false;
+    if (qr) { var q = qr; qr = null; try { q.stop().then(function () { q.clear(); }).catch(function () {}); } catch (e) {} }
+  }
+
+  function restart() {
+    var p = Promise.resolve();
+    if (qr) { var q = qr; qr = null; p = q.stop().then(function () { q.clear(); }).catch(function () {}); }
+    p.then(start).catch(function () { $('hint').textContent = 'No se pudo cambiar de cámara.'; });
+  }
+
+  function fail(e) {
+    var reader = $('reader'); if (reader) reader.style.display = 'none';
+    $('hint').style.display = 'none';
+    var box = document.createElement('div'); box.className = 'err-box';
+    box.innerHTML = 'No se pudo abrir la cámara (' + (e && e.message ? e.message : e) + ').<br>' +
+      'Dé permiso de cámara a este sitio y recargue, o <b>digite el código</b> abajo.';
+    $('reader').parentNode.insertBefore(box, $('reader').nextSibling);
+  }
+
+  // Botón enviar / Enter del campo manual
+  $('send').onclick = function () { sendCode($('manual').value); $('manual').value = ''; };
+  $('manual').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); $('send').click(); } });
+
+  if (!window.Html5Qrcode) { fail(new Error('No se cargó la librería del escáner (sin conexión).')); return; }
+
+  Html5Qrcode.getCameras().then(function (list) {
+    cams = list || []; idx = 0;
+    for (var i = 0; i < cams.length; i++) { if (/back|rear|trase|environment/i.test(cams[i].label || '')) { idx = i; break; } }
+    var sw = $('switch');
+    if (sw && cams.length > 1) { sw.hidden = false; sw.onclick = function () { torchOn = false; idx = (idx + 1) % cams.length; restart(); }; }
+    return start();
+  }).catch(fail);
+
+  window.addEventListener('pagehide', stop);
+})();
+</script>
+</body>
+</html>
